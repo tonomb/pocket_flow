@@ -1,0 +1,8 @@
+[package]
+name = "pocket_flow"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.29"
+chrono = "0.4"
