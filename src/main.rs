@@ -1,11 +1,19 @@
 use eframe::egui;
 use std::time::{Duration, Instant};
+use chrono::{DateTime, Utc};
 
-// const WORK_DURATION: u64 = 1 * 60; // 25 minutes in seconds
-const WORK_DURATION: u64 = 5; // 25 minutes in seconds
-// const BREAK_DURATION: u64
-//  = 1 * 60; // 5 minutes in seconds
-const BREAK_DURATION: u64 = 5; // 5 minutes in seconds
+mod db;
+mod models;
+
+use db::Database;
+use models::WorkSession;
+
+const WORK_DURATION: u64 = 25 * 60; // 25 minutes in seconds
+const BREAK_DURATION: u64= 5 * 60; // 5 minutes in seconds
+
+// Test Values
+// const WORK_DURATION: u64 = 5; 
+// const BREAK_DURATION: u64 = 5; 
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -40,15 +48,25 @@ struct PomodoroApp {
     state: TimerState,
     remaining_seconds: u64,
     last_tick: Option<Instant>,
+    work_session_start: Option<DateTime<Utc>>,
+    today_session_count: usize,
+    db: Database,
 }
 
 impl Default for PomodoroApp {
     fn default() -> Self {
+        let db = Database::new().expect("Failed to initialize database");
+        let today_session_count = db.get_sessions_count_for_today()
+            .unwrap_or(0);
+        
         Self {
             mode: PomodoroMode::Work,
             state: TimerState::Stopped,
             remaining_seconds: WORK_DURATION,
             last_tick: None,
+            work_session_start: None,
+            today_session_count,
+            db,
         }
     }
 }
@@ -57,6 +75,11 @@ impl PomodoroApp {
     fn start(&mut self) {
         self.state = TimerState::Running;
         self.last_tick = Some(Instant::now());
+        
+        // Track work session start time
+        if self.mode == PomodoroMode::Work && self.work_session_start.is_none() {
+            self.work_session_start = Some(Utc::now());
+        }
     }
 
     fn pause(&mut self) {
@@ -71,6 +94,9 @@ impl PomodoroApp {
             PomodoroMode::Break => BREAK_DURATION,
         };
         self.last_tick = None;
+        
+        // Reset work session tracking (uncompleted sessions are not saved)
+        self.work_session_start = None;
     }
 
     fn start_break(&mut self, ctx: &egui::Context) {
@@ -78,6 +104,9 @@ impl PomodoroApp {
         self.remaining_seconds = BREAK_DURATION;
         self.state = TimerState::Running;
         self.last_tick = Some(Instant::now());
+        
+        // Reset work session tracking
+        self.work_session_start = None;
         
         // Request fullscreen
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
@@ -113,6 +142,19 @@ impl PomodoroApp {
                     if self.remaining_seconds == 0 {
                         match self.mode {
                             PomodoroMode::Work => {
+                                // Save completed work session
+                                if let Some(start_time) = self.work_session_start {
+                                    let completed_at = Utc::now();
+                                    let session = WorkSession::new(start_time, completed_at);
+                                    
+                                    if let Err(e) = self.db.save_work_session(&session) {
+                                        eprintln!("Failed to save work session: {}", e);
+                                    } else {
+                                        // Increment session count on successful save
+                                        self.today_session_count += 1;
+                                    }
+                                }
+                                
                                 // Work period done, start break
                                 self.start_break(ctx);
                             }
@@ -149,6 +191,16 @@ impl eframe::App for PomodoroApp {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(40.0);
+                    
+                    // Display session dots
+                    if self.today_session_count > 0 {
+                        let dots = "• ".repeat(self.today_session_count);
+                        ui.label(
+                            egui::RichText::new(dots.trim_end())
+                                .size(20.0)
+                        );
+                        ui.add_space(10.0);
+                    }
                     
                     ui.heading("Pomodoro Timer");
                     ui.add_space(20.0);
