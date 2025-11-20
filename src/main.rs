@@ -123,7 +123,14 @@ impl PomodoroApp {
     }
 
     fn skip_break(&mut self, ctx: &egui::Context) {
-        self.start_work(ctx);
+        self.mode = PomodoroMode::Work;
+        self.remaining_seconds = WORK_DURATION;
+        self.state = TimerState::Stopped;
+        self.last_tick = None;
+        
+        // Exit fullscreen and minimize window
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
     }
 
     fn update_timer(&mut self, ctx: &egui::Context) {
@@ -245,6 +252,11 @@ impl eframe::App for PomodoroApp {
         } else {
             // Break period UI
             egui::CentralPanel::default().show(ctx, |ui| {
+                // Check for Enter key press during break
+                if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && self.remaining_seconds > 0 {
+                    self.skip_break(ctx);
+                }
+                
                 ui.vertical_centered(|ui| {
                     // Use flexible spacing based on available space
                     let available_height = ui.available_height();
@@ -269,6 +281,15 @@ impl eframe::App for PomodoroApp {
                     );
                     
                     ui.add_space(30.0);
+                    
+                    // Show Enter key hint during active break
+                    if self.remaining_seconds > 0 {
+                        ui.label(
+                            egui::RichText::new("Press Enter to stay in the pocket and keep your flow")
+                                .size(16.0)
+                        );
+                        ui.add_space(20.0);
+                    }
                     
                     // Break control buttons
                     ui.horizontal(|ui| {
