@@ -72,13 +72,15 @@ impl Default for PomodoroApp {
 }
 
 impl PomodoroApp {
-    fn start(&mut self) {
+    fn start(&mut self, ctx: &egui::Context) {
         self.state = TimerState::Running;
         self.last_tick = Some(Instant::now());
         
         // Track work session start time
         if self.mode == PomodoroMode::Work && self.work_session_start.is_none() {
             self.work_session_start = Some(Utc::now());
+            // Minimize window when starting work session
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
     }
 
@@ -226,7 +228,7 @@ impl eframe::App for PomodoroApp {
                         match self.state {
                             TimerState::Stopped => {
                                 if ui.button("Start").clicked() {
-                                    self.start();
+                                    self.start(ctx);
                                 }
                             }
                             TimerState::Running => {
@@ -236,7 +238,7 @@ impl eframe::App for PomodoroApp {
                             }
                             TimerState::Paused => {
                                 if ui.button("Resume").clicked() {
-                                    self.start();
+                                    self.start(ctx);
                                 }
                             }
                         }
