@@ -127,8 +127,11 @@ impl PomodoroApp {
     fn skip_break(&mut self, ctx: &egui::Context) {
         self.mode = PomodoroMode::Work;
         self.remaining_seconds = WORK_DURATION;
-        self.state = TimerState::Stopped;
-        self.last_tick = None;
+        self.state = TimerState::Running;
+        self.last_tick = Some(Instant::now());
+        
+        // Track new work session start time
+        self.work_session_start = Some(Utc::now());
         
         // Exit fullscreen and minimize window
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
