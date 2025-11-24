@@ -51,6 +51,7 @@ struct PomodoroApp {
     work_session_start: Option<DateTime<Utc>>,
     today_session_count: usize,
     db: Database,
+    break_window_minimized: bool,
 }
 
 impl Default for PomodoroApp {
@@ -67,6 +68,7 @@ impl Default for PomodoroApp {
             work_session_start: None,
             today_session_count,
             db,
+            break_window_minimized: false,
         }
     }
 }
@@ -110,7 +112,8 @@ impl PomodoroApp {
         // Reset work session tracking
         self.work_session_start = None;
         
-        // Request fullscreen
+        // Reset minimized state and request fullscreen
+        self.break_window_minimized = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
     }
 
@@ -136,6 +139,12 @@ impl PomodoroApp {
         // Exit fullscreen and minimize window
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+    }
+
+    fn minimize_break_window(&mut self, ctx: &egui::Context) {
+        // Exit fullscreen and mark as minimized
+        self.break_window_minimized = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
     }
 
     fn update_timer(&mut self, ctx: &egui::Context) {
@@ -174,8 +183,10 @@ impl PomodoroApp {
                                 // Break done, stop and wait for user
                                 self.state = TimerState::Stopped;
                                 self.last_tick = None;
-                                // Exit fullscreen when break ends
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                                // Exit fullscreen when break ends (only if not already minimized)
+                                if !self.break_window_minimized {
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                                }
                             }
                         }
                     }
@@ -246,20 +257,26 @@ impl eframe::App for PomodoroApp {
                             }
                         }
                         
-                        if self.state != TimerState::Stopped {
-                            if ui.button("Restart").clicked() {
+                        if self.state != TimerState::Stopped
+                            && ui.button("Restart").clicked() {
                                 self.restart();
                             }
-                        }
                     });
                 });
             });
         } else {
             // Break period UI
             egui::CentralPanel::default().show(ctx, |ui| {
-                // Check for Enter key press during break
-                if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && self.remaining_seconds > 0 {
-                    self.skip_break(ctx);
+                // Check for keyboard shortcuts during break
+                if self.remaining_seconds > 0 {
+                    // Enter key to skip break
+                    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.skip_break(ctx);
+                    }
+                    // ESC key to minimize fullscreen break window
+                    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.break_window_minimized {
+                        self.minimize_break_window(ctx);
+                    }
                 }
                 
                 ui.vertical_centered(|ui| {
@@ -287,12 +304,19 @@ impl eframe::App for PomodoroApp {
                     
                     ui.add_space(30.0);
                     
-                    // Show Enter key hint during active break
+                    // Show keyboard hints during active break
                     if self.remaining_seconds > 0 {
                         ui.label(
                             egui::RichText::new("Press Enter to stay in the pocket and keep your flow")
                                 .size(16.0)
                         );
+                        ui.add_space(10.0);
+                        if !self.break_window_minimized {
+                            ui.label(
+                                egui::RichText::new("Press ESC to minimize and multitask during break")
+                                    .size(16.0)
+                            );
+                        }
                         ui.add_space(20.0);
                     }
                     
@@ -306,6 +330,12 @@ impl eframe::App for PomodoroApp {
                             if ui.button("Skip Break").clicked() {
                                 self.skip_break(ctx);
                             }
+                            
+                            // Only show Minimize button if not already minimized
+                            if !self.break_window_minimized
+                                && ui.button("Minimize").clicked() {
+                                    self.minimize_break_window(ctx);
+                                }
                         }
                     });
                 });
