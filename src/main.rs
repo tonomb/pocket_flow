@@ -13,7 +13,15 @@ const BREAK_DURATION: u64= 5 * 60; // 5 minutes in seconds
 
 // Test Values
 // const WORK_DURATION: u64 = 5; 
-// const BREAK_DURATION: u64 = 5; 
+// const BREAK_DURATION: u64 = 5;
+
+// Color Palette
+const COLOR_MAIN: egui::Color32 = egui::Color32::from_rgb(0x00, 0x12, 0x40); // #001240
+const COLOR_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(0xFA, 0xFA, 0xFA); // #FAFAFA
+const COLOR_ACCENT: egui::Color32 = egui::Color32::from_rgb(0xFF, 0x73, 0x1C); // #FF731C
+const COLOR_ALT_WHITE: egui::Color32 = egui::Color32::from_rgb(0xFF, 0xF7, 0xEA); // #FFF7EA
+const COLOR_SECONDARY: egui::Color32 = egui::Color32::from_rgb(0x60, 0x9E, 0xF6); // #609EF6
+const COLOR_SECONDARY_DARK: egui::Color32 = egui::Color32::from_rgb(0x16, 0x46, 0xA1); // #1646A1 
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -208,6 +216,36 @@ impl PomodoroApp {
 impl eframe::App for PomodoroApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_timer(ctx);
+        
+        // Apply custom theme
+        ctx.style_mut(|style| {
+            // Set overall background color to main dark blue
+            style.visuals.panel_fill = COLOR_MAIN;
+            
+            // Set text colors to white/light
+            style.visuals.override_text_color = Some(COLOR_BACKGROUND);
+            
+            // Button styling - inverted (dark inactive, light hover)
+            style.visuals.widgets.inactive.weak_bg_fill = COLOR_SECONDARY_DARK;
+            style.visuals.widgets.inactive.bg_fill = COLOR_SECONDARY_DARK;
+            style.visuals.widgets.inactive.fg_stroke.color = COLOR_BACKGROUND;
+            
+            style.visuals.widgets.hovered.weak_bg_fill = COLOR_SECONDARY;
+            style.visuals.widgets.hovered.bg_fill = COLOR_SECONDARY;
+            style.visuals.widgets.hovered.fg_stroke.color = COLOR_MAIN;
+            
+            style.visuals.widgets.active.weak_bg_fill = COLOR_SECONDARY;
+            style.visuals.widgets.active.bg_fill = COLOR_SECONDARY;
+            style.visuals.widgets.active.fg_stroke.color = COLOR_MAIN;
+            
+            // Rounding for buttons
+            style.visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+            style.visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
+            style.visuals.widgets.active.rounding = egui::Rounding::same(8.0);
+            
+            // Button padding
+            style.spacing.button_padding = egui::vec2(16.0, 8.0);
+        });
 
         if self.mode == PomodoroMode::Work {
             // Normal window for work period
@@ -221,11 +259,17 @@ impl eframe::App for PomodoroApp {
                         ui.label(
                             egui::RichText::new(dots.trim_end())
                                 .size(20.0)
+                                .color(COLOR_ACCENT)
                         );
                         ui.add_space(10.0);
                     }
                     
-                    ui.heading("Pomodoro Timer");
+                    ui.label(
+                        egui::RichText::new("Pomodoro Timer")
+                            .size(24.0)
+                            .color(COLOR_BACKGROUND)
+                            .strong()
+                    );
                     ui.add_space(20.0);
                     
                     // Display timer
@@ -233,6 +277,7 @@ impl eframe::App for PomodoroApp {
                         egui::RichText::new(self.format_time())
                             .size(64.0)
                             .monospace()
+                            .color(COLOR_BACKGROUND)
                     );
                     
                     ui.add_space(30.0);
@@ -241,26 +286,39 @@ impl eframe::App for PomodoroApp {
                     ui.horizontal(|ui| {
                         match self.state {
                             TimerState::Stopped => {
-                                if ui.button("Start").clicked() {
+                                if ui.button(
+                                    egui::RichText::new("Start")
+                                        .size(18.0)
+                                ).clicked() {
                                     self.start(ctx);
                                 }
                             }
                             TimerState::Running => {
-                                if ui.button("Pause").clicked() {
+                                if ui.button(
+                                    egui::RichText::new("Pause")
+                                        .size(18.0)
+                                ).clicked() {
                                     self.pause();
                                 }
                             }
                             TimerState::Paused => {
-                                if ui.button("Resume").clicked() {
+                                if ui.button(
+                                    egui::RichText::new("Resume")
+                                        .size(18.0)
+                                ).clicked() {
                                     self.start(ctx);
                                 }
                             }
                         }
                         
-                        if self.state != TimerState::Stopped
-                            && ui.button("Restart").clicked() {
+                        if self.state != TimerState::Stopped {
+                            if ui.button(
+                                egui::RichText::new("Restart")
+                                    .size(18.0)
+                            ).clicked() {
                                 self.restart();
                             }
+                        }
                     });
                 });
             });
@@ -291,7 +349,12 @@ impl eframe::App for PomodoroApp {
                     };
                     ui.add_space(spacing);
                     
-                    ui.heading("Break Time!");
+                    ui.label(
+                        egui::RichText::new("Break Time!")
+                            .size(32.0)
+                            .color(COLOR_BACKGROUND)
+                            .strong()
+                    );
                     ui.add_space(20.0);
                     
                     // Display break timer
@@ -300,6 +363,7 @@ impl eframe::App for PomodoroApp {
                         egui::RichText::new(self.format_time())
                             .size(timer_size)
                             .monospace()
+                            .color(COLOR_BACKGROUND)
                     );
                     
                     ui.add_space(30.0);
@@ -309,12 +373,14 @@ impl eframe::App for PomodoroApp {
                         ui.label(
                             egui::RichText::new("Press Enter to stay in the pocket and keep your flow")
                                 .size(16.0)
+                                .color(COLOR_BACKGROUND)
                         );
                         ui.add_space(10.0);
                         if !self.break_window_minimized {
                             ui.label(
                                 egui::RichText::new("Press ESC to minimize and multitask during break")
                                     .size(16.0)
+                                    .color(COLOR_BACKGROUND)
                             );
                         }
                         ui.add_space(20.0);
@@ -323,19 +389,29 @@ impl eframe::App for PomodoroApp {
                     // Break control buttons
                     ui.horizontal(|ui| {
                         if self.remaining_seconds == 0 {
-                            if ui.button("Start New Timer").clicked() {
+                            if ui.button(
+                                egui::RichText::new("Start New Timer")
+                                    .size(18.0)
+                            ).clicked() {
                                 self.start_work(ctx);
                             }
                         } else {
-                            if ui.button("Skip Break").clicked() {
+                            if ui.button(
+                                egui::RichText::new("Skip Break")
+                                    .size(18.0)
+                            ).clicked() {
                                 self.skip_break(ctx);
                             }
                             
                             // Only show Minimize button if not already minimized
-                            if !self.break_window_minimized
-                                && ui.button("Minimize").clicked() {
+                            if !self.break_window_minimized {
+                                if ui.button(
+                                    egui::RichText::new("Minimize")
+                                        .size(18.0)
+                                ).clicked() {
                                     self.minimize_break_window(ctx);
                                 }
+                            }
                         }
                     });
                 });
