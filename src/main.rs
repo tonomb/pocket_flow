@@ -424,25 +424,35 @@ impl eframe::App for PomodoroApp {
                 ui.vertical_centered(|ui| {
                     // Use flexible spacing based on available space
                     let available_height = ui.available_height();
-                    let spacing = if self.remaining_seconds > 0 {
-                        // Still in break - use more spacing for fullscreen
+                    let spacing = if self.remaining_seconds > 0 && !self.break_window_minimized {
+                        // Still in break fullscreen - use more spacing
                         available_height * 0.3
                     } else {
-                        // Break ended - use less spacing for normal window
+                        // Break ended or minimized - use less spacing for normal window
                         40.0
                     };
                     ui.add_space(spacing);
                     
+                    // Adjust text sizes based on minimized state
+                    let title_size = if self.break_window_minimized { 24.0 } else { 32.0 };
+                    let hint_size = if self.break_window_minimized { 14.0 } else { 16.0 };
+                    
                     ui.label(
                         egui::RichText::new("Break Time!")
-                            .size(32.0)
+                            .size(title_size)
                             .color(COLOR_BACKGROUND)
                             .strong()
                     );
                     ui.add_space(20.0);
                     
-                    // Display break timer
-                    let timer_size = if self.remaining_seconds > 0 { 96.0 } else { 64.0 };
+                    // Display break timer - smaller when minimized
+                    let timer_size = if self.break_window_minimized {
+                        64.0
+                    } else if self.remaining_seconds > 0 {
+                        96.0
+                    } else {
+                        64.0
+                    };
                     ui.label(
                         egui::RichText::new(self.format_time())
                             .size(timer_size)
@@ -456,14 +466,14 @@ impl eframe::App for PomodoroApp {
                     if self.remaining_seconds > 0 {
                         ui.label(
                             egui::RichText::new("Press Enter to stay in the pocket and keep your flow")
-                                .size(16.0)
+                                .size(hint_size)
                                 .color(COLOR_BACKGROUND)
                         );
                         ui.add_space(10.0);
                         if !self.break_window_minimized {
                             ui.label(
                                 egui::RichText::new("Press ESC to minimize and multitask during break")
-                                    .size(16.0)
+                                    .size(hint_size)
                                     .color(COLOR_BACKGROUND)
                             );
                         }
