@@ -34,7 +34,50 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Pocket Flow - Pomodoro Timer",
         options,
-        Box::new(|_cc| Ok(Box::new(PomodoroApp::default()))),
+        Box::new(|cc| {
+            // Load custom fonts
+            let mut fonts = egui::FontDefinitions::default();
+            
+            // Load SF Pro Display Regular
+            fonts.font_data.insert(
+                "SF Pro Display".to_owned(),
+                egui::FontData::from_static(include_bytes!(
+                    "../assets/fonts/sf-pro-display/SFPRODISPLAYREGULAR.OTF"
+                )).into(),
+            );
+            
+            // Load SF Pro Display Bold
+            fonts.font_data.insert(
+                "SF Pro Display Bold".to_owned(),
+                egui::FontData::from_static(include_bytes!(
+                    "../assets/fonts/sf-pro-display/SFPRODISPLAYBOLD.OTF"
+                )).into(),
+            );
+            
+            // Load SF Pro Display Medium
+            fonts.font_data.insert(
+                "SF Pro Display Medium".to_owned(),
+                egui::FontData::from_static(include_bytes!(
+                    "../assets/fonts/sf-pro-display/SFPRODISPLAYMEDIUM.OTF"
+                )).into(),
+            );
+            
+            // Set SF Pro Display as the default proportional font
+            fonts.families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "SF Pro Display".to_owned());
+            
+            // Also use it for monospace (timer display)
+            fonts.families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .insert(0, "SF Pro Display Medium".to_owned());
+            
+            cc.egui_ctx.set_fonts(fonts);
+            
+            Ok(Box::new(PomodoroApp::default()))
+        }),
     )
 }
 
@@ -282,40 +325,43 @@ impl eframe::App for PomodoroApp {
                     
                     ui.add_space(30.0);
                     
-                    // Control buttons
+                    // Control buttons (centered)
                     ui.horizontal(|ui| {
+                        let button_width = 100.0;
+                        let num_buttons = if self.state != TimerState::Stopped { 2.0 } else { 1.0 };
+                        let spacing = ui.spacing().item_spacing.x;
+                        let total_width = button_width * num_buttons + spacing * (num_buttons - 1.0);
+                        let available_width = ui.available_width();
+                        ui.add_space((available_width - total_width) / 2.0);
+                        
                         match self.state {
                             TimerState::Stopped => {
-                                if ui.button(
-                                    egui::RichText::new("Start")
-                                        .size(18.0)
-                                ).clicked() {
+                                if ui.add_sized([button_width, 36.0], egui::Button::new(
+                                    egui::RichText::new("Start").size(18.0)
+                                )).clicked() {
                                     self.start(ctx);
                                 }
                             }
                             TimerState::Running => {
-                                if ui.button(
-                                    egui::RichText::new("Pause")
-                                        .size(18.0)
-                                ).clicked() {
+                                if ui.add_sized([button_width, 36.0], egui::Button::new(
+                                    egui::RichText::new("Pause").size(18.0)
+                                )).clicked() {
                                     self.pause();
                                 }
                             }
                             TimerState::Paused => {
-                                if ui.button(
-                                    egui::RichText::new("Resume")
-                                        .size(18.0)
-                                ).clicked() {
+                                if ui.add_sized([button_width, 36.0], egui::Button::new(
+                                    egui::RichText::new("Resume").size(18.0)
+                                )).clicked() {
                                     self.start(ctx);
                                 }
                             }
                         }
                         
                         if self.state != TimerState::Stopped {
-                            if ui.button(
-                                egui::RichText::new("Restart")
-                                    .size(18.0)
-                            ).clicked() {
+                            if ui.add_sized([button_width, 36.0], egui::Button::new(
+                                egui::RichText::new("Restart").size(18.0)
+                            )).clicked() {
                                 self.restart();
                             }
                         }
@@ -386,29 +432,33 @@ impl eframe::App for PomodoroApp {
                         ui.add_space(20.0);
                     }
                     
-                    // Break control buttons
+                    // Break control buttons (centered)
                     ui.horizontal(|ui| {
+                        let button_width = 120.0;
+                        let num_buttons = if self.remaining_seconds == 0 { 1.0 } else if self.break_window_minimized { 1.0 } else { 2.0 };
+                        let spacing = ui.spacing().item_spacing.x;
+                        let total_width = button_width * num_buttons + spacing * (num_buttons - 1.0);
+                        let available_width = ui.available_width();
+                        ui.add_space((available_width - total_width) / 2.0);
+                        
                         if self.remaining_seconds == 0 {
-                            if ui.button(
-                                egui::RichText::new("Start New Timer")
-                                    .size(18.0)
-                            ).clicked() {
+                            if ui.add_sized([button_width, 36.0], egui::Button::new(
+                                egui::RichText::new("Start New Timer").size(18.0)
+                            )).clicked() {
                                 self.start_work(ctx);
                             }
                         } else {
-                            if ui.button(
-                                egui::RichText::new("Skip Break")
-                                    .size(18.0)
-                            ).clicked() {
+                            if ui.add_sized([button_width, 36.0], egui::Button::new(
+                                egui::RichText::new("Skip Break").size(18.0)
+                            )).clicked() {
                                 self.skip_break(ctx);
                             }
                             
                             // Only show Minimize button if not already minimized
                             if !self.break_window_minimized {
-                                if ui.button(
-                                    egui::RichText::new("Minimize")
-                                        .size(18.0)
-                                ).clicked() {
+                                if ui.add_sized([button_width, 36.0], egui::Button::new(
+                                    egui::RichText::new("Minimize").size(18.0)
+                                )).clicked() {
                                     self.minimize_break_window(ctx);
                                 }
                             }
