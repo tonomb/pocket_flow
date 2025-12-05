@@ -1,6 +1,7 @@
 use eframe::egui;
 use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
+use tray_icon::{TrayIcon, TrayIconBuilder};
 
 mod db;
 mod models;
@@ -103,6 +104,7 @@ struct PomodoroApp {
     today_session_count: usize,
     db: Database,
     break_window_minimized: bool,
+    tray_icon: Option<TrayIcon>,
 }
 
 impl Default for PomodoroApp {
@@ -110,6 +112,13 @@ impl Default for PomodoroApp {
         let db = Database::new().expect("Failed to initialize database");
         let today_session_count = db.get_sessions_count_for_today()
             .unwrap_or(0);
+        
+        // Create tray icon for menu bar timer display
+        let tray_icon = TrayIconBuilder::new()
+            .with_title("25:00")
+            .with_tooltip("Pocket Flow - Pomodoro Timer")
+            .build()
+            .ok();
         
         Self {
             mode: PomodoroMode::Work,
@@ -120,6 +129,7 @@ impl Default for PomodoroApp {
             today_session_count,
             db,
             break_window_minimized: false,
+            tray_icon,
         }
     }
 }
@@ -135,11 +145,14 @@ impl PomodoroApp {
             // Minimize window when starting work session
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
+        
+        self.update_menu_bar();
     }
 
     fn pause(&mut self) {
         self.state = TimerState::Paused;
         self.last_tick = None;
+        self.update_menu_bar();
     }
 
     fn restart(&mut self) {
@@ -152,6 +165,7 @@ impl PomodoroApp {
         
         // Reset work session tracking (uncompleted sessions are not saved)
         self.work_session_start = None;
+        self.update_menu_bar();
     }
 
     fn start_break(&mut self, ctx: &egui::Context) {
@@ -166,6 +180,7 @@ impl PomodoroApp {
         // Reset minimized state and request fullscreen
         self.break_window_minimized = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+        self.update_menu_bar();
     }
 
     fn start_work(&mut self, ctx: &egui::Context) {
@@ -176,6 +191,7 @@ impl PomodoroApp {
         
         // Exit fullscreen
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        self.update_menu_bar();
     }
 
     fn skip_break(&mut self, ctx: &egui::Context) {
@@ -190,6 +206,7 @@ impl PomodoroApp {
         // Exit fullscreen and minimize window
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        self.update_menu_bar();
     }
 
     fn minimize_break_window(&mut self, ctx: &egui::Context) {
@@ -209,6 +226,9 @@ impl PomodoroApp {
                     if self.remaining_seconds > 0 {
                         self.remaining_seconds -= 1;
                     }
+                    
+                    // Update menu bar timer display
+                    self.update_menu_bar();
                     
                     // Check if timer completed
                     if self.remaining_seconds == 0 {
@@ -234,6 +254,8 @@ impl PomodoroApp {
                                 // Break done, stop and wait for user
                                 self.state = TimerState::Stopped;
                                 self.last_tick = None;
+                                // Update menu bar to show break is done
+                                self.update_menu_bar();
                                 // Exit fullscreen when break ends (only if not already minimized)
                                 if !self.break_window_minimized {
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -253,6 +275,22 @@ impl PomodoroApp {
         let minutes = self.remaining_seconds / 60;
         let seconds = self.remaining_seconds % 60;
         format!("{:02}:{:02}", minutes, seconds)
+    }
+    
+    fn update_menu_bar(&self) {
+        if let Some(tray) = &self.tray_icon {
+            let title = match self.state {
+                TimerState::Stopped => {
+                    match self.mode {
+                        PomodoroMode::Work => "Ready".to_string(),
+                        PomodoroMode::Break => "Break Done".to_string(),
+                    }
+                }
+                TimerState::Paused => format!("{} (Paused)", self.format_time()),
+                TimerState::Running => self.format_time(),
+            };
+            let _ = tray.set_title(Some(&title));
+        }
     }
 }
 
