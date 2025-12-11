@@ -1,7 +1,7 @@
 use eframe::egui;
 use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
-use tray_icon::{TrayIcon, TrayIconBuilder};
+use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 mod db;
 mod models;
@@ -82,7 +82,7 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum TimerState {
     Stopped,
     Running,
@@ -297,6 +297,24 @@ impl PomodoroApp {
 impl eframe::App for PomodoroApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_timer(ctx);
+        
+        // Handle tray icon click - show window centered at small size
+        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            if let TrayIconEvent::Click { .. } = event {
+                self.break_window_minimized = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(400.0, 300.0)));
+                if let Some(cmd) = egui::ViewportCommand::center_on_screen(ctx) {
+                    ctx.send_viewport_cmd(cmd);
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+        
+        // Keep polling for tray events even when minimized
+        ctx.request_repaint_after(Duration::from_millis(100));
         
         // Apply custom theme
         ctx.style_mut(|style| {
