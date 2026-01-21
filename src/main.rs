@@ -20,6 +20,7 @@ const BREAK_DURATION: u64 = 15 * 60; // 15 minutes in seconds
 const COLOR_MAIN: egui::Color32 = egui::Color32::from_rgb(0x00, 0x12, 0x40); // #001240
 const COLOR_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(0xFA, 0xFA, 0xFA); // #FAFAFA
 const COLOR_ACCENT: egui::Color32 = egui::Color32::from_rgb(0xFF, 0x73, 0x1C); // #FF731C
+#[allow(dead_code)]
 const COLOR_ALT_WHITE: egui::Color32 = egui::Color32::from_rgb(0xFF, 0xF7, 0xEA); // #FFF7EA
 const COLOR_SECONDARY: egui::Color32 = egui::Color32::from_rgb(0x60, 0x9E, 0xF6); // #609EF6
 const COLOR_SECONDARY_DARK: egui::Color32 = egui::Color32::from_rgb(0x16, 0x46, 0xA1); // #1646A1
@@ -36,7 +37,10 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 300.0])
-            .with_resizable(true),
+            .with_resizable(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+            .with_fullsize_content_view(true),
         ..Default::default()
     };
 
@@ -357,101 +361,149 @@ impl eframe::App for PomodoroApp {
         if self.mode == PomodoroMode::Work {
             // Normal window for work period
             egui::CentralPanel::default().show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
+                // Disable default item spacing for precise control
+                ui.spacing_mut().item_spacing.y = 0.0;
 
-                    // Display session dots
-                    if self.today_session_count > 0 {
-                        let dots = "• ".repeat(self.today_session_count);
-                        ui.label(
-                            egui::RichText::new(dots.trim_end())
-                                .size(20.0)
-                                .color(COLOR_ACCENT),
-                        );
-                        ui.add_space(10.0);
-                    }
+                let available_height = ui.available_height();
+                let available_width = ui.available_width();
 
-                    ui.label(
-                        egui::RichText::new("Pomodoro Timer")
-                            .size(24.0)
-                            .color(COLOR_BACKGROUND)
-                            .strong(),
-                    );
-                    ui.add_space(20.0);
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                        ui.min_rect().min,
+                        egui::vec2(available_width, available_height),
+                    )),
+                    |ui| {
+                        ui.vertical_centered(|ui| {
+                            // Measure content height first
+                            let dots_height = if self.today_session_count > 0 {
+                                24.0
+                            } else {
+                                0.0
+                            };
+                            let dots_spacing = if self.today_session_count > 0 {
+                                4.0
+                            } else {
+                                0.0
+                            };
+                            let title_height = 28.0;
+                            let title_spacing = 8.0;
+                            let timer_height = 70.0;
+                            let timer_spacing = 8.0;
+                            let button_height = 36.0;
 
-                    // Display timer
-                    ui.label(
-                        egui::RichText::new(self.format_time())
-                            .size(64.0)
-                            .monospace()
-                            .color(COLOR_BACKGROUND),
-                    );
+                            let content_height = dots_height
+                                + dots_spacing
+                                + title_height
+                                + title_spacing
+                                + timer_height
+                                + timer_spacing
+                                + button_height;
+                            let top_padding = ((available_height - content_height) / 2.0).max(12.0);
 
-                    ui.add_space(30.0);
+                            ui.add_space(top_padding);
 
-                    // Control buttons (centered)
-                    ui.horizontal(|ui| {
-                        let button_width = 100.0;
-                        let num_buttons = if self.state != TimerState::Stopped {
-                            2.0
-                        } else {
-                            1.0
-                        };
-                        let spacing = ui.spacing().item_spacing.x;
-                        let total_width =
-                            button_width * num_buttons + spacing * (num_buttons - 1.0);
-                        let available_width = ui.available_width();
-                        ui.add_space((available_width - total_width) / 2.0);
+                            // Display session dots
+                            if self.today_session_count > 0 {
+                                let dots = "• ".repeat(self.today_session_count);
+                                ui.label(
+                                    egui::RichText::new(dots.trim_end())
+                                        .size(20.0)
+                                        .color(COLOR_ACCENT),
+                                );
+                                ui.add_space(4.0);
+                            }
 
-                        match self.state {
-                            TimerState::Stopped => {
-                                if ui
-                                    .add_sized(
-                                        [button_width, 36.0],
-                                        egui::Button::new(egui::RichText::new("Start").size(18.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    self.resume(ctx);
+                            ui.label(
+                                egui::RichText::new("Pomodoro Timer")
+                                    .size(24.0)
+                                    .color(COLOR_BACKGROUND)
+                                    .strong(),
+                            );
+                            ui.add_space(8.0);
+
+                            // Display timer
+                            ui.label(
+                                egui::RichText::new(self.format_time())
+                                    .size(64.0)
+                                    .monospace()
+                                    .color(COLOR_BACKGROUND),
+                            );
+
+                            ui.add_space(8.0);
+
+                            // Control buttons (centered)
+                            ui.horizontal(|ui| {
+                                let button_width = 100.0;
+                                let num_buttons = if self.state != TimerState::Stopped {
+                                    2.0
+                                } else {
+                                    1.0
+                                };
+                                let spacing = ui.spacing().item_spacing.x;
+                                let total_width =
+                                    button_width * num_buttons + spacing * (num_buttons - 1.0);
+                                let available_width = ui.available_width();
+                                ui.add_space((available_width - total_width) / 2.0);
+
+                                match self.state {
+                                    TimerState::Stopped => {
+                                        if ui
+                                            .add_sized(
+                                                [button_width, 36.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("Start").size(18.0),
+                                                ),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.resume(ctx);
+                                        }
+                                    }
+                                    TimerState::Running => {
+                                        if ui
+                                            .add_sized(
+                                                [button_width, 36.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("Pause").size(18.0),
+                                                ),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.pause();
+                                        }
+                                    }
+                                    TimerState::Paused => {
+                                        if ui
+                                            .add_sized(
+                                                [button_width, 36.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("Resume").size(18.0),
+                                                ),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.resume(ctx);
+                                        }
+                                    }
                                 }
-                            }
-                            TimerState::Running => {
-                                if ui
-                                    .add_sized(
-                                        [button_width, 36.0],
-                                        egui::Button::new(egui::RichText::new("Pause").size(18.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    self.pause();
-                                }
-                            }
-                            TimerState::Paused => {
-                                if ui
-                                    .add_sized(
-                                        [button_width, 36.0],
-                                        egui::Button::new(egui::RichText::new("Resume").size(18.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    self.resume(ctx);
-                                }
-                            }
-                        }
 
-                        if self.state != TimerState::Stopped {
-                            if ui
-                                .add_sized(
-                                    [button_width, 36.0],
-                                    egui::Button::new(egui::RichText::new("Restart").size(18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.restart();
-                            }
-                        }
-                    });
-                });
+                                if self.state != TimerState::Stopped {
+                                    if ui
+                                        .add_sized(
+                                            [button_width, 36.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Restart").size(18.0),
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.restart();
+                                    }
+                                }
+                            });
+                        });
+                    },
+                );
             });
         } else {
             // Break period UI
