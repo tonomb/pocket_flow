@@ -1,6 +1,6 @@
+use chrono::{DateTime, Utc};
 use eframe::egui;
 use std::time::{Duration, Instant};
-use chrono::{DateTime, Utc};
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 mod db;
@@ -9,11 +9,11 @@ mod models;
 use db::Database;
 use models::WorkSession;
 
-const WORK_DURATION: u64 = 25 * 60; // 25 minutes in seconds
-const BREAK_DURATION: u64= 5 * 60; // 5 minutes in seconds
+const WORK_DURATION: u64 = 45 * 60; // 45 minutes in seconds
+const BREAK_DURATION: u64 = 15 * 60; // 15 minutes in seconds
 
 // Test Values
-// const WORK_DURATION: u64 = 5; 
+// const WORK_DURATION: u64 = 5;
 // const BREAK_DURATION: u64 = 5;
 
 // Color Palette
@@ -22,7 +22,15 @@ const COLOR_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(0xFA, 0xFA, 0xFA
 const COLOR_ACCENT: egui::Color32 = egui::Color32::from_rgb(0xFF, 0x73, 0x1C); // #FF731C
 const COLOR_ALT_WHITE: egui::Color32 = egui::Color32::from_rgb(0xFF, 0xF7, 0xEA); // #FFF7EA
 const COLOR_SECONDARY: egui::Color32 = egui::Color32::from_rgb(0x60, 0x9E, 0xF6); // #609EF6
-const COLOR_SECONDARY_DARK: egui::Color32 = egui::Color32::from_rgb(0x16, 0x46, 0xA1); // #1646A1 
+const COLOR_SECONDARY_DARK: egui::Color32 = egui::Color32::from_rgb(0x16, 0x46, 0xA1); // #1646A1
+
+/// Calculate the new remaining seconds after elapsed time.
+/// Returns (new_remaining_seconds, timer_completed)
+fn calculate_remaining_time(remaining: u64, elapsed_secs: u64) -> (u64, bool) {
+    let new_remaining = remaining.saturating_sub(elapsed_secs);
+    let completed = remaining > 0 && new_remaining == 0;
+    (new_remaining, completed)
+}
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -38,45 +46,50 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             // Load custom fonts
             let mut fonts = egui::FontDefinitions::default();
-            
+
             // Load SF Pro Display Regular
             fonts.font_data.insert(
                 "SF Pro Display".to_owned(),
                 egui::FontData::from_static(include_bytes!(
                     "../assets/fonts/sf-pro-display/SFPRODISPLAYREGULAR.OTF"
-                )).into(),
+                ))
+                .into(),
             );
-            
+
             // Load SF Pro Display Bold
             fonts.font_data.insert(
                 "SF Pro Display Bold".to_owned(),
                 egui::FontData::from_static(include_bytes!(
                     "../assets/fonts/sf-pro-display/SFPRODISPLAYBOLD.OTF"
-                )).into(),
+                ))
+                .into(),
             );
-            
+
             // Load SF Pro Display Medium
             fonts.font_data.insert(
                 "SF Pro Display Medium".to_owned(),
                 egui::FontData::from_static(include_bytes!(
                     "../assets/fonts/sf-pro-display/SFPRODISPLAYMEDIUM.OTF"
-                )).into(),
+                ))
+                .into(),
             );
-            
+
             // Set SF Pro Display as the default proportional font
-            fonts.families
+            fonts
+                .families
                 .entry(egui::FontFamily::Proportional)
                 .or_default()
                 .insert(0, "SF Pro Display".to_owned());
-            
+
             // Also use it for monospace (timer display)
-            fonts.families
+            fonts
+                .families
                 .entry(egui::FontFamily::Monospace)
                 .or_default()
                 .insert(0, "SF Pro Display Medium".to_owned());
-            
+
             cc.egui_ctx.set_fonts(fonts);
-            
+
             Ok(Box::new(PomodoroApp::default()))
         }),
     )
@@ -110,16 +123,15 @@ struct PomodoroApp {
 impl Default for PomodoroApp {
     fn default() -> Self {
         let db = Database::new().expect("Failed to initialize database");
-        let today_session_count = db.get_sessions_count_for_today()
-            .unwrap_or(0);
-        
+        let today_session_count = db.get_sessions_count_for_today().unwrap_or(0);
+
         // Create tray icon for menu bar timer display
         let tray_icon = TrayIconBuilder::new()
             .with_title("25:00")
             .with_tooltip("Pocket Flow - Pomodoro Timer")
             .build()
             .ok();
-        
+
         Self {
             mode: PomodoroMode::Work,
             state: TimerState::Stopped,
@@ -135,17 +147,31 @@ impl Default for PomodoroApp {
 }
 
 impl PomodoroApp {
-    fn start(&mut self, ctx: &egui::Context) {
+    /// Set the timer to a specific duration and optionally start it running.
+    fn set_timer(&mut self, duration: u64, start_running: bool) {
+        self.remaining_seconds = duration;
+        if start_running {
+            self.state = TimerState::Running;
+            self.last_tick = Some(Instant::now());
+        } else {
+            self.state = TimerState::Stopped;
+            self.last_tick = None;
+        }
+        self.update_menu_bar();
+    }
+
+    /// Resume the timer from its current position (does not reset duration).
+    fn resume(&mut self, ctx: &egui::Context) {
         self.state = TimerState::Running;
         self.last_tick = Some(Instant::now());
-        
+
         // Track work session start time
         if self.mode == PomodoroMode::Work && self.work_session_start.is_none() {
             self.work_session_start = Some(Utc::now());
             // Minimize window when starting work session
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
-        
+
         self.update_menu_bar();
     }
 
@@ -156,57 +182,40 @@ impl PomodoroApp {
     }
 
     fn restart(&mut self) {
-        self.state = TimerState::Stopped;
-        self.remaining_seconds = match self.mode {
+        let duration = match self.mode {
             PomodoroMode::Work => WORK_DURATION,
             PomodoroMode::Break => BREAK_DURATION,
         };
-        self.last_tick = None;
-        
+        self.set_timer(duration, false);
         // Reset work session tracking (uncompleted sessions are not saved)
         self.work_session_start = None;
-        self.update_menu_bar();
     }
 
     fn start_break(&mut self, ctx: &egui::Context) {
         self.mode = PomodoroMode::Break;
-        self.remaining_seconds = BREAK_DURATION;
-        self.state = TimerState::Running;
-        self.last_tick = Some(Instant::now());
-        
+        self.set_timer(BREAK_DURATION, true);
         // Reset work session tracking
         self.work_session_start = None;
-        
         // Reset minimized state and request fullscreen
         self.break_window_minimized = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-        self.update_menu_bar();
     }
 
     fn start_work(&mut self, ctx: &egui::Context) {
         self.mode = PomodoroMode::Work;
-        self.remaining_seconds = WORK_DURATION;
-        self.state = TimerState::Stopped;
-        self.last_tick = None;
-        
+        self.set_timer(WORK_DURATION, false);
         // Exit fullscreen
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-        self.update_menu_bar();
     }
 
     fn skip_break(&mut self, ctx: &egui::Context) {
         self.mode = PomodoroMode::Work;
-        self.remaining_seconds = WORK_DURATION;
-        self.state = TimerState::Running;
-        self.last_tick = Some(Instant::now());
-        
+        self.set_timer(WORK_DURATION, true);
         // Track new work session start time
         self.work_session_start = Some(Utc::now());
-        
         // Exit fullscreen and minimize window
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-        self.update_menu_bar();
     }
 
     fn minimize_break_window(&mut self, ctx: &egui::Context) {
@@ -219,26 +228,27 @@ impl PomodoroApp {
         if self.state == TimerState::Running {
             if let Some(last_tick) = self.last_tick {
                 let elapsed = last_tick.elapsed();
-                
+
                 if elapsed >= Duration::from_secs(1) {
+                    let elapsed_secs = elapsed.as_secs();
                     self.last_tick = Some(Instant::now());
-                    
-                    if self.remaining_seconds > 0 {
-                        self.remaining_seconds -= 1;
-                    }
-                    
+
+                    let (new_remaining, completed) =
+                        calculate_remaining_time(self.remaining_seconds, elapsed_secs);
+                    self.remaining_seconds = new_remaining;
+
                     // Update menu bar timer display
                     self.update_menu_bar();
-                    
+
                     // Check if timer completed
-                    if self.remaining_seconds == 0 {
+                    if completed {
                         match self.mode {
                             PomodoroMode::Work => {
                                 // Save completed work session
                                 if let Some(start_time) = self.work_session_start {
                                     let completed_at = Utc::now();
                                     let session = WorkSession::new(start_time, completed_at);
-                                    
+
                                     if let Err(e) = self.db.save_work_session(&session) {
                                         eprintln!("Failed to save work session: {}", e);
                                     } else {
@@ -246,7 +256,7 @@ impl PomodoroApp {
                                         self.today_session_count += 1;
                                     }
                                 }
-                                
+
                                 // Work period done, start break
                                 self.start_break(ctx);
                             }
@@ -265,7 +275,7 @@ impl PomodoroApp {
                     }
                 }
             }
-            
+
             // Request repaint for smooth countdown
             ctx.request_repaint();
         }
@@ -276,16 +286,14 @@ impl PomodoroApp {
         let seconds = self.remaining_seconds % 60;
         format!("{:02}:{:02}", minutes, seconds)
     }
-    
+
     fn update_menu_bar(&self) {
         if let Some(tray) = &self.tray_icon {
             let title = match self.state {
-                TimerState::Stopped => {
-                    match self.mode {
-                        PomodoroMode::Work => "Ready".to_string(),
-                        PomodoroMode::Break => "Break Done".to_string(),
-                    }
-                }
+                TimerState::Stopped => match self.mode {
+                    PomodoroMode::Work => "Ready".to_string(),
+                    PomodoroMode::Break => "Break Done".to_string(),
+                },
                 TimerState::Paused => format!("{} (Paused)", self.format_time()),
                 TimerState::Running => self.format_time(),
             };
@@ -297,7 +305,7 @@ impl PomodoroApp {
 impl eframe::App for PomodoroApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_timer(ctx);
-        
+
         // Handle tray icon click - show window centered at small size
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
             if let TrayIconEvent::Click { .. } = event {
@@ -312,36 +320,36 @@ impl eframe::App for PomodoroApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
-        
+
         // Keep polling for tray events even when minimized
         ctx.request_repaint_after(Duration::from_millis(100));
-        
+
         // Apply custom theme
         ctx.style_mut(|style| {
             // Set overall background color to main dark blue
             style.visuals.panel_fill = COLOR_MAIN;
-            
+
             // Set text colors to white/light
             style.visuals.override_text_color = Some(COLOR_BACKGROUND);
-            
+
             // Button styling - inverted (dark inactive, light hover)
             style.visuals.widgets.inactive.weak_bg_fill = COLOR_SECONDARY_DARK;
             style.visuals.widgets.inactive.bg_fill = COLOR_SECONDARY_DARK;
             style.visuals.widgets.inactive.fg_stroke.color = COLOR_BACKGROUND;
-            
+
             style.visuals.widgets.hovered.weak_bg_fill = COLOR_SECONDARY;
             style.visuals.widgets.hovered.bg_fill = COLOR_SECONDARY;
             style.visuals.widgets.hovered.fg_stroke.color = COLOR_MAIN;
-            
+
             style.visuals.widgets.active.weak_bg_fill = COLOR_SECONDARY;
             style.visuals.widgets.active.bg_fill = COLOR_SECONDARY;
             style.visuals.widgets.active.fg_stroke.color = COLOR_MAIN;
-            
+
             // Rounding for buttons
             style.visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
             style.visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
             style.visuals.widgets.active.rounding = egui::Rounding::same(8.0);
-            
+
             // Button padding
             style.spacing.button_padding = egui::vec2(16.0, 8.0);
         });
@@ -351,73 +359,94 @@ impl eframe::App for PomodoroApp {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(40.0);
-                    
+
                     // Display session dots
                     if self.today_session_count > 0 {
                         let dots = "• ".repeat(self.today_session_count);
                         ui.label(
                             egui::RichText::new(dots.trim_end())
                                 .size(20.0)
-                                .color(COLOR_ACCENT)
+                                .color(COLOR_ACCENT),
                         );
                         ui.add_space(10.0);
                     }
-                    
+
                     ui.label(
                         egui::RichText::new("Pomodoro Timer")
                             .size(24.0)
                             .color(COLOR_BACKGROUND)
-                            .strong()
+                            .strong(),
                     );
                     ui.add_space(20.0);
-                    
+
                     // Display timer
                     ui.label(
                         egui::RichText::new(self.format_time())
                             .size(64.0)
                             .monospace()
-                            .color(COLOR_BACKGROUND)
+                            .color(COLOR_BACKGROUND),
                     );
-                    
+
                     ui.add_space(30.0);
-                    
+
                     // Control buttons (centered)
                     ui.horizontal(|ui| {
                         let button_width = 100.0;
-                        let num_buttons = if self.state != TimerState::Stopped { 2.0 } else { 1.0 };
+                        let num_buttons = if self.state != TimerState::Stopped {
+                            2.0
+                        } else {
+                            1.0
+                        };
                         let spacing = ui.spacing().item_spacing.x;
-                        let total_width = button_width * num_buttons + spacing * (num_buttons - 1.0);
+                        let total_width =
+                            button_width * num_buttons + spacing * (num_buttons - 1.0);
                         let available_width = ui.available_width();
                         ui.add_space((available_width - total_width) / 2.0);
-                        
+
                         match self.state {
                             TimerState::Stopped => {
-                                if ui.add_sized([button_width, 36.0], egui::Button::new(
-                                    egui::RichText::new("Start").size(18.0)
-                                )).clicked() {
-                                    self.start(ctx);
+                                if ui
+                                    .add_sized(
+                                        [button_width, 36.0],
+                                        egui::Button::new(egui::RichText::new("Start").size(18.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.resume(ctx);
                                 }
                             }
                             TimerState::Running => {
-                                if ui.add_sized([button_width, 36.0], egui::Button::new(
-                                    egui::RichText::new("Pause").size(18.0)
-                                )).clicked() {
+                                if ui
+                                    .add_sized(
+                                        [button_width, 36.0],
+                                        egui::Button::new(egui::RichText::new("Pause").size(18.0)),
+                                    )
+                                    .clicked()
+                                {
                                     self.pause();
                                 }
                             }
                             TimerState::Paused => {
-                                if ui.add_sized([button_width, 36.0], egui::Button::new(
-                                    egui::RichText::new("Resume").size(18.0)
-                                )).clicked() {
-                                    self.start(ctx);
+                                if ui
+                                    .add_sized(
+                                        [button_width, 36.0],
+                                        egui::Button::new(egui::RichText::new("Resume").size(18.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.resume(ctx);
                                 }
                             }
                         }
-                        
+
                         if self.state != TimerState::Stopped {
-                            if ui.add_sized([button_width, 36.0], egui::Button::new(
-                                egui::RichText::new("Restart").size(18.0)
-                            )).clicked() {
+                            if ui
+                                .add_sized(
+                                    [button_width, 36.0],
+                                    egui::Button::new(egui::RichText::new("Restart").size(18.0)),
+                                )
+                                .clicked()
+                            {
                                 self.restart();
                             }
                         }
@@ -434,11 +463,13 @@ impl eframe::App for PomodoroApp {
                         self.skip_break(ctx);
                     }
                     // ESC key to minimize fullscreen break window
-                    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.break_window_minimized {
+                    if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                        && !self.break_window_minimized
+                    {
                         self.minimize_break_window(ctx);
                     }
                 }
-                
+
                 ui.vertical_centered(|ui| {
                     // Use flexible spacing based on available space
                     let available_height = ui.available_height();
@@ -450,19 +481,27 @@ impl eframe::App for PomodoroApp {
                         40.0
                     };
                     ui.add_space(spacing);
-                    
+
                     // Adjust text sizes based on minimized state
-                    let title_size = if self.break_window_minimized { 24.0 } else { 32.0 };
-                    let hint_size = if self.break_window_minimized { 14.0 } else { 16.0 };
-                    
+                    let title_size = if self.break_window_minimized {
+                        24.0
+                    } else {
+                        32.0
+                    };
+                    let hint_size = if self.break_window_minimized {
+                        14.0
+                    } else {
+                        16.0
+                    };
+
                     ui.label(
                         egui::RichText::new("Break Time!")
                             .size(title_size)
                             .color(COLOR_BACKGROUND)
-                            .strong()
+                            .strong(),
                     );
                     ui.add_space(20.0);
-                    
+
                     // Display break timer - smaller when minimized
                     let timer_size = if self.break_window_minimized {
                         64.0
@@ -475,56 +514,83 @@ impl eframe::App for PomodoroApp {
                         egui::RichText::new(self.format_time())
                             .size(timer_size)
                             .monospace()
-                            .color(COLOR_BACKGROUND)
+                            .color(COLOR_BACKGROUND),
                     );
-                    
+
                     ui.add_space(30.0);
-                    
+
                     // Show keyboard hints during active break
                     if self.remaining_seconds > 0 {
                         ui.label(
-                            egui::RichText::new("Press Enter to stay in the pocket and keep your flow")
-                                .size(hint_size)
-                                .color(COLOR_BACKGROUND)
+                            egui::RichText::new(
+                                "Press Enter to stay in the pocket and keep your flow",
+                            )
+                            .size(hint_size)
+                            .color(COLOR_BACKGROUND),
                         );
                         ui.add_space(10.0);
                         if !self.break_window_minimized {
                             ui.label(
-                                egui::RichText::new("Press ESC to minimize and multitask during break")
-                                    .size(hint_size)
-                                    .color(COLOR_BACKGROUND)
+                                egui::RichText::new(
+                                    "Press ESC to minimize and multitask during break",
+                                )
+                                .size(hint_size)
+                                .color(COLOR_BACKGROUND),
                             );
                         }
                         ui.add_space(20.0);
                     }
-                    
+
                     // Break control buttons (centered)
                     ui.horizontal(|ui| {
                         let button_width = 120.0;
-                        let num_buttons = if self.remaining_seconds == 0 { 1.0 } else if self.break_window_minimized { 1.0 } else { 2.0 };
+                        let num_buttons = if self.remaining_seconds == 0 {
+                            1.0
+                        } else if self.break_window_minimized {
+                            1.0
+                        } else {
+                            2.0
+                        };
                         let spacing = ui.spacing().item_spacing.x;
-                        let total_width = button_width * num_buttons + spacing * (num_buttons - 1.0);
+                        let total_width =
+                            button_width * num_buttons + spacing * (num_buttons - 1.0);
                         let available_width = ui.available_width();
                         ui.add_space((available_width - total_width) / 2.0);
-                        
+
                         if self.remaining_seconds == 0 {
-                            if ui.add_sized([button_width, 36.0], egui::Button::new(
-                                egui::RichText::new("Start New Timer").size(18.0)
-                            )).clicked() {
+                            if ui
+                                .add_sized(
+                                    [button_width, 36.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("Start New Timer").size(18.0),
+                                    ),
+                                )
+                                .clicked()
+                            {
                                 self.start_work(ctx);
                             }
                         } else {
-                            if ui.add_sized([button_width, 36.0], egui::Button::new(
-                                egui::RichText::new("Skip Break").size(18.0)
-                            )).clicked() {
+                            if ui
+                                .add_sized(
+                                    [button_width, 36.0],
+                                    egui::Button::new(egui::RichText::new("Skip Break").size(18.0)),
+                                )
+                                .clicked()
+                            {
                                 self.skip_break(ctx);
                             }
-                            
+
                             // Only show Minimize button if not already minimized
                             if !self.break_window_minimized {
-                                if ui.add_sized([button_width, 36.0], egui::Button::new(
-                                    egui::RichText::new("Minimize").size(18.0)
-                                )).clicked() {
+                                if ui
+                                    .add_sized(
+                                        [button_width, 36.0],
+                                        egui::Button::new(
+                                            egui::RichText::new("Minimize").size(18.0),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
                                     self.minimize_break_window(ctx);
                                 }
                             }
@@ -533,5 +599,58 @@ impl eframe::App for PomodoroApp {
                 });
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_remaining_time_normal_tick() {
+        // Normal case: 1 second passes
+        let (remaining, completed) = calculate_remaining_time(100, 1);
+        assert_eq!(remaining, 99);
+        assert!(!completed);
+    }
+
+    #[test]
+    fn test_calculate_remaining_time_multiple_seconds() {
+        // Multiple seconds pass (e.g., screen was locked)
+        let (remaining, completed) = calculate_remaining_time(100, 30);
+        assert_eq!(remaining, 70);
+        assert!(!completed);
+    }
+
+    #[test]
+    fn test_calculate_remaining_time_completes_exactly() {
+        // Timer completes exactly
+        let (remaining, completed) = calculate_remaining_time(10, 10);
+        assert_eq!(remaining, 0);
+        assert!(completed);
+    }
+
+    #[test]
+    fn test_calculate_remaining_time_overshoots() {
+        // More time passes than remaining (user away longer than timer)
+        let (remaining, completed) = calculate_remaining_time(60, 300);
+        assert_eq!(remaining, 0);
+        assert!(completed);
+    }
+
+    #[test]
+    fn test_calculate_remaining_time_already_zero() {
+        // Timer already at zero
+        let (remaining, completed) = calculate_remaining_time(0, 1);
+        assert_eq!(remaining, 0);
+        assert!(!completed); // Not a "completion" event, already was zero
+    }
+
+    #[test]
+    fn test_calculate_remaining_time_large_elapsed() {
+        // Very large elapsed time (computer slept for hours)
+        let (remaining, completed) = calculate_remaining_time(WORK_DURATION, 7200); // 2 hours
+        assert_eq!(remaining, 0);
+        assert!(completed);
     }
 }
