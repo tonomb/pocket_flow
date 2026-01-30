@@ -522,133 +522,116 @@ impl eframe::App for PomodoroApp {
                     }
                 }
 
-                ui.vertical_centered(|ui| {
-                    // Use flexible spacing based on available space
-                    let available_height = ui.available_height();
-                    let spacing = if self.remaining_seconds > 0 && !self.break_window_minimized {
-                        // Still in break fullscreen - use more spacing
-                        available_height * 0.3
-                    } else {
-                        // Break ended or minimized - use less spacing for normal window
-                        40.0
-                    };
-                    ui.add_space(spacing);
+                // Disable default item spacing for precise control
+                ui.spacing_mut().item_spacing.y = 0.0;
 
-                    // Adjust text sizes based on minimized state
-                    let title_size = if self.break_window_minimized {
-                        24.0
-                    } else {
-                        32.0
-                    };
-                    let hint_size = if self.break_window_minimized {
-                        14.0
-                    } else {
-                        16.0
-                    };
+                let available_height = ui.available_height();
+                let available_width = ui.available_width();
 
-                    ui.label(
-                        egui::RichText::new("Break Time!")
-                            .size(title_size)
-                            .color(COLOR_BACKGROUND)
-                            .strong(),
-                    );
-                    ui.add_space(20.0);
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                        ui.min_rect().min,
+                        egui::vec2(available_width, available_height),
+                    )),
+                    |ui| {
+                        ui.vertical_centered(|ui| {
+                            // Measure content height first
+                            let title_height = 28.0;
+                            let title_spacing = 8.0;
+                            let timer_height = 70.0;
+                            let timer_spacing = 8.0;
+                            let hint_height = if self.remaining_seconds > 0 {
+                                32.0
+                            } else {
+                                0.0
+                            };
+                            let hint_spacing = if self.remaining_seconds > 0 {
+                                12.0
+                            } else {
+                                0.0
+                            };
+                            let button_height = 36.0;
 
-                    // Display break timer - smaller when minimized
-                    let timer_size = if self.break_window_minimized {
-                        64.0
-                    } else if self.remaining_seconds > 0 {
-                        96.0
-                    } else {
-                        64.0
-                    };
-                    ui.label(
-                        egui::RichText::new(self.format_time())
-                            .size(timer_size)
-                            .monospace()
-                            .color(COLOR_BACKGROUND),
-                    );
+                            let content_height = title_height
+                                + title_spacing
+                                + timer_height
+                                + timer_spacing
+                                + hint_height
+                                + hint_spacing
+                                + button_height;
+                            let top_padding = ((available_height - content_height) / 2.0).max(12.0);
 
-                    ui.add_space(30.0);
+                            ui.add_space(top_padding);
 
-                    // Show keyboard hints during active break
-                    if self.remaining_seconds > 0 {
-                        ui.label(
-                            egui::RichText::new(
-                                "Press Enter to stay in the pocket and keep your flow",
-                            )
-                            .size(hint_size)
-                            .color(COLOR_BACKGROUND),
-                        );
-                        ui.add_space(10.0);
-                        if !self.break_window_minimized {
                             ui.label(
-                                egui::RichText::new(
-                                    "Press ESC to minimize and multitask during break",
-                                )
-                                .size(hint_size)
-                                .color(COLOR_BACKGROUND),
+                                egui::RichText::new("Break Time!")
+                                    .size(24.0)
+                                    .color(COLOR_BACKGROUND)
+                                    .strong(),
                             );
-                        }
-                        ui.add_space(20.0);
-                    }
+                            ui.add_space(8.0);
 
-                    // Break control buttons (centered)
-                    ui.horizontal(|ui| {
-                        let button_width = 120.0;
-                        let num_buttons = if self.remaining_seconds == 0 {
-                            1.0
-                        } else if self.break_window_minimized {
-                            1.0
-                        } else {
-                            2.0
-                        };
-                        let spacing = ui.spacing().item_spacing.x;
-                        let total_width =
-                            button_width * num_buttons + spacing * (num_buttons - 1.0);
-                        let available_width = ui.available_width();
-                        ui.add_space((available_width - total_width) / 2.0);
+                            // Display break timer
+                            ui.label(
+                                egui::RichText::new(self.format_time())
+                                    .size(64.0)
+                                    .monospace()
+                                    .color(COLOR_BACKGROUND),
+                            );
 
-                        if self.remaining_seconds == 0 {
-                            if ui
-                                .add_sized(
-                                    [button_width, 36.0],
-                                    egui::Button::new(
-                                        egui::RichText::new("Start New Timer").size(18.0),
-                                    ),
-                                )
-                                .clicked()
-                            {
-                                self.start_work(ctx);
-                            }
-                        } else {
-                            if ui
-                                .add_sized(
-                                    [button_width, 36.0],
-                                    egui::Button::new(egui::RichText::new("Skip Break").size(18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.skip_break(ctx);
-                            }
+                            ui.add_space(8.0);
 
-                            // Only show Minimize button if not already minimized
-                            if !self.break_window_minimized {
-                                if ui
-                                    .add_sized(
-                                        [button_width, 36.0],
-                                        egui::Button::new(
-                                            egui::RichText::new("Minimize").size(18.0),
-                                        ),
+                            // Show hint text only during active break
+                            if self.remaining_seconds > 0 {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Press Enter to stay in the pocket and keep your flow",
                                     )
-                                    .clicked()
-                                {
-                                    self.minimize_break_window(ctx);
-                                }
+                                    .size(14.0)
+                                    .color(COLOR_BACKGROUND),
+                                );
+                                ui.add_space(12.0);
                             }
-                        }
-                    });
-                });
+
+                            // Break control buttons (centered)
+                            ui.horizontal(|ui| {
+                                let button_width = 100.0;
+                                let num_buttons = 1.0;
+                                let spacing = ui.spacing().item_spacing.x;
+                                let total_width =
+                                    button_width * num_buttons + spacing * (num_buttons - 1.0);
+                                let available_width = ui.available_width();
+                                ui.add_space((available_width - total_width) / 2.0);
+
+                                if self.remaining_seconds == 0 {
+                                    if ui
+                                        .add_sized(
+                                            [button_width, 36.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Start New Timer").size(18.0),
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.start_work(ctx);
+                                    }
+                                } else {
+                                    if ui
+                                        .add_sized(
+                                            [button_width, 36.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Skip Break").size(18.0),
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.skip_break(ctx);
+                                    }
+                                }
+                            });
+                        });
+                    },
+                );
             });
         }
     }
