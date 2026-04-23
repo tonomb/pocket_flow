@@ -33,6 +33,10 @@ fn calculate_remaining_time(remaining: u64, elapsed_secs: u64) -> (u64, bool) {
     (new_remaining, completed)
 }
 
+fn break_finished_state() -> (PomodoroMode, u64, TimerState) {
+    (PomodoroMode::Work, WORK_DURATION, TimerState::Stopped)
+}
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -56,8 +60,7 @@ fn main() -> eframe::Result<()> {
                 "SF Pro Display".to_owned(),
                 egui::FontData::from_static(include_bytes!(
                     "../assets/fonts/sf-pro-display/SFPRODISPLAYREGULAR.OTF"
-                ))
-                .into(),
+                )),
             );
 
             // Load SF Pro Display Bold
@@ -65,8 +68,7 @@ fn main() -> eframe::Result<()> {
                 "SF Pro Display Bold".to_owned(),
                 egui::FontData::from_static(include_bytes!(
                     "../assets/fonts/sf-pro-display/SFPRODISPLAYBOLD.OTF"
-                ))
-                .into(),
+                )),
             );
 
             // Load SF Pro Display Medium
@@ -74,8 +76,7 @@ fn main() -> eframe::Result<()> {
                 "SF Pro Display Medium".to_owned(),
                 egui::FontData::from_static(include_bytes!(
                     "../assets/fonts/sf-pro-display/SFPRODISPLAYMEDIUM.OTF"
-                ))
-                .into(),
+                )),
             );
 
             // Set SF Pro Display as the default proportional font
@@ -106,7 +107,7 @@ enum TimerState {
     Paused,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum PomodoroMode {
     Work,
     Break,
@@ -122,6 +123,7 @@ struct PomodoroApp {
     db: Database,
     break_window_minimized: bool,
     tray_icon: Option<TrayIcon>,
+    minimize_after: Option<Instant>,
 }
 
 impl Default for PomodoroApp {
@@ -130,8 +132,9 @@ impl Default for PomodoroApp {
         let today_session_count = db.get_sessions_count_for_today().unwrap_or(0);
 
         // Create tray icon for menu bar timer display
+        let initial_time = format!("{:02}:00", WORK_DURATION / 60);
         let tray_icon = TrayIconBuilder::new()
-            .with_title("25:00")
+            .with_title(&initial_time)
             .with_tooltip("Pocket Flow - Pomodoro Timer")
             .build()
             .ok();
@@ -146,6 +149,7 @@ impl Default for PomodoroApp {
             db,
             break_window_minimized: false,
             tray_icon,
+            minimize_after: None,
         }
     }
 }
@@ -202,14 +206,18 @@ impl PomodoroApp {
         self.work_session_start = None;
         // Reset minimized state and request fullscreen
         self.break_window_minimized = false;
+        self.minimize_after = None;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
     }
 
-    fn start_work(&mut self, ctx: &egui::Context) {
-        self.mode = PomodoroMode::Work;
-        self.set_timer(WORK_DURATION, false);
-        // Exit fullscreen
+    fn finish_break(&mut self, ctx: &egui::Context) {
+        let (mode, duration, _) = break_finished_state();
+        self.mode = mode;
+        self.set_timer(duration, false);
+        self.break_window_minimized = false;
+        self.minimize_after = None;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(400.0, 300.0)));
     }
 
     fn skip_break(&mut self, ctx: &egui::Context) {
@@ -217,9 +225,11 @@ impl PomodoroApp {
         self.set_timer(WORK_DURATION, true);
         // Track new work session start time
         self.work_session_start = Some(Utc::now());
-        // Exit fullscreen and minimize window
+        // Exit fullscreen and resize to small window first;
+        // defer minimize so macOS can finish the fullscreen exit animation
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(400.0, 300.0)));
+        self.minimize_after = Some(Instant::now() + Duration::from_millis(600));
     }
 
     fn minimize_break_window(&mut self, ctx: &egui::Context) {
@@ -265,15 +275,7 @@ impl PomodoroApp {
                                 self.start_break(ctx);
                             }
                             PomodoroMode::Break => {
-                                // Break done, stop and wait for user
-                                self.state = TimerState::Stopped;
-                                self.last_tick = None;
-                                // Update menu bar to show break is done
-                                self.update_menu_bar();
-                                // Exit fullscreen when break ends (only if not already minimized)
-                                if !self.break_window_minimized {
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-                                }
+                                self.finish_break(ctx);
                             }
                         }
                     }
@@ -301,19 +303,28 @@ impl PomodoroApp {
                 TimerState::Paused => format!("{} (Paused)", self.format_time()),
                 TimerState::Running => self.format_time(),
             };
-            let _ = tray.set_title(Some(&title));
+            tray.set_title(Some(&title));
         }
     }
 }
 
 impl eframe::App for PomodoroApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle deferred minimize after exiting fullscreen
+        if let Some(target) = self.minimize_after {
+            if Instant::now() >= target {
+                self.minimize_after = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        }
+
         self.update_timer(ctx);
 
         // Handle tray icon click - show window centered at small size
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
             if let TrayIconEvent::Click { .. } = event {
                 self.break_window_minimized = false;
+                self.minimize_after = None;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -487,8 +498,8 @@ impl eframe::App for PomodoroApp {
                                     }
                                 }
 
-                                if self.state != TimerState::Stopped {
-                                    if ui
+                                if self.state != TimerState::Stopped
+                                    && ui
                                         .add_sized(
                                             [button_width, 36.0],
                                             egui::Button::new(
@@ -496,9 +507,8 @@ impl eframe::App for PomodoroApp {
                                             ),
                                         )
                                         .clicked()
-                                    {
-                                        self.restart();
-                                    }
+                                {
+                                    self.restart();
                                 }
                             });
                         });
@@ -613,20 +623,18 @@ impl eframe::App for PomodoroApp {
                                         )
                                         .clicked()
                                     {
-                                        self.start_work(ctx);
+                                        self.finish_break(ctx);
                                     }
-                                } else {
-                                    if ui
-                                        .add_sized(
-                                            [button_width, 36.0],
-                                            egui::Button::new(
-                                                egui::RichText::new("Skip Break").size(18.0),
-                                            ),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.skip_break(ctx);
-                                    }
+                                } else if ui
+                                    .add_sized(
+                                        [button_width, 36.0],
+                                        egui::Button::new(
+                                            egui::RichText::new("Skip Break").size(18.0),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.skip_break(ctx);
                                 }
                             });
                         });
@@ -685,6 +693,44 @@ mod tests {
     fn test_calculate_remaining_time_large_elapsed() {
         // Very large elapsed time (computer slept for hours)
         let (remaining, completed) = calculate_remaining_time(WORK_DURATION, 7200); // 2 hours
+        assert_eq!(remaining, 0);
+        assert!(completed);
+    }
+
+    #[test]
+    fn test_break_finished_state_returns_work_mode() {
+        let (mode, remaining, state) = break_finished_state();
+        assert_eq!(mode, PomodoroMode::Work);
+        assert_eq!(remaining, WORK_DURATION);
+        assert_eq!(state, TimerState::Stopped);
+    }
+
+    #[test]
+    fn test_break_timer_completion_triggers_transition() {
+        // Given: break timer with 1 second left
+        let (remaining, completed) = calculate_remaining_time(1, 1);
+        assert_eq!(remaining, 0);
+        assert!(completed);
+
+        // When: break completes, we get the finished state
+        let (mode, new_remaining, state) = break_finished_state();
+
+        // Then: transitions to work mode, stopped, full duration
+        assert_eq!(mode, PomodoroMode::Work);
+        assert_eq!(new_remaining, WORK_DURATION);
+        assert_eq!(state, TimerState::Stopped);
+    }
+
+    #[test]
+    fn test_break_timer_not_yet_complete() {
+        let (remaining, completed) = calculate_remaining_time(BREAK_DURATION, 60);
+        assert_eq!(remaining, BREAK_DURATION - 60);
+        assert!(!completed);
+    }
+
+    #[test]
+    fn test_break_timer_completes_with_overshoot() {
+        let (remaining, completed) = calculate_remaining_time(BREAK_DURATION, BREAK_DURATION + 100);
         assert_eq!(remaining, 0);
         assert!(completed);
     }
