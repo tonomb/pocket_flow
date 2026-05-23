@@ -11,10 +11,12 @@ use models::WorkSession;
 
 const WORK_DURATION: u64 = 45 * 60; // 45 minutes in seconds
 const BREAK_DURATION: u64 = 15 * 60; // 15 minutes in seconds
+const OVERFLOW_DURATION: u64 = 5 * 60; // 5 minutes in seconds (UX label: "Pocket")
 
 // Test Values
 // const WORK_DURATION: u64 = 5;
 // const BREAK_DURATION: u64 = 5;
+// const OVERFLOW_DURATION: u64 = 3;
 
 // Color Palette
 const COLOR_MAIN: egui::Color32 = egui::Color32::from_rgb(0x00, 0x12, 0x40); // #001240
@@ -25,16 +27,32 @@ const COLOR_ALT_WHITE: egui::Color32 = egui::Color32::from_rgb(0xFF, 0xF7, 0xEA)
 const COLOR_SECONDARY: egui::Color32 = egui::Color32::from_rgb(0x60, 0x9E, 0xF6); // #609EF6
 const COLOR_SECONDARY_DARK: egui::Color32 = egui::Color32::from_rgb(0x16, 0x46, 0xA1); // #1646A1
 
-/// Calculate the new remaining seconds after elapsed time.
-/// Returns (new_remaining_seconds, timer_completed)
-fn calculate_remaining_time(remaining: u64, elapsed_secs: u64) -> (u64, bool) {
-    let new_remaining = remaining.saturating_sub(elapsed_secs);
-    let completed = remaining > 0 && new_remaining == 0;
-    (new_remaining, completed)
+/// Compute remaining whole seconds until a deadline.
+/// Returns (remaining_seconds, deadline_reached).
+fn remaining_until(deadline: DateTime<Utc>, now: DateTime<Utc>) -> (u64, bool) {
+    if now >= deadline {
+        (0, true)
+    } else {
+        ((deadline - now).num_seconds() as u64, false)
+    }
+}
+
+/// Compute the absolute deadline for a timer with the given duration in seconds.
+fn compute_deadline(now: DateTime<Utc>, duration_secs: u64) -> DateTime<Utc> {
+    now + chrono::TimeDelta::seconds(duration_secs as i64)
 }
 
 fn break_finished_state() -> (PomodoroMode, u64, TimerState) {
     (PomodoroMode::Work, WORK_DURATION, TimerState::Stopped)
+}
+
+/// State produced when the overflow ("Pocket") timer completes.
+/// Auto-transitions into a running Break timer. The actual transition is
+/// performed by `start_break(ctx)` in `update_timer`; this helper exists so
+/// the contract can be asserted by tests.
+#[cfg_attr(not(test), allow(dead_code))]
+fn overflow_finished_state() -> (PomodoroMode, u64, TimerState) {
+    (PomodoroMode::Break, BREAK_DURATION, TimerState::Running)
 }
 
 fn main() -> eframe::Result<()> {
@@ -111,13 +129,21 @@ enum TimerState {
 enum PomodoroMode {
     Work,
     Break,
+    /// Configurable short timer (default 5 min) shown to the user as "Pocket".
+    /// Lets the user wrap up their train of thought during a break before the
+    /// break resumes. Not counted as a completed work session.
+    Overflow,
 }
 
 struct PomodoroApp {
     mode: PomodoroMode,
     state: TimerState,
     remaining_seconds: u64,
-    last_tick: Option<Instant>,
+    /// Absolute wall-clock time when the running timer reaches zero.
+    /// `Some` when running, `None` when stopped or paused.
+    /// Using an absolute deadline instead of tick deltas makes the timer
+    /// immune to macOS screen-lock / sleep suspending the process.
+    end_time: Option<DateTime<Utc>>,
     work_session_start: Option<DateTime<Utc>>,
     today_session_count: usize,
     db: Database,
@@ -143,7 +169,7 @@ impl Default for PomodoroApp {
             mode: PomodoroMode::Work,
             state: TimerState::Stopped,
             remaining_seconds: WORK_DURATION,
-            last_tick: None,
+            end_time: None,
             work_session_start: None,
             today_session_count,
             db,
@@ -160,10 +186,10 @@ impl PomodoroApp {
         self.remaining_seconds = duration;
         if start_running {
             self.state = TimerState::Running;
-            self.last_tick = Some(Instant::now());
+            self.end_time = Some(compute_deadline(Utc::now(), duration));
         } else {
             self.state = TimerState::Stopped;
-            self.last_tick = None;
+            self.end_time = None;
         }
         self.update_menu_bar();
     }
@@ -171,7 +197,7 @@ impl PomodoroApp {
     /// Resume the timer from its current position (does not reset duration).
     fn resume(&mut self, ctx: &egui::Context) {
         self.state = TimerState::Running;
-        self.last_tick = Some(Instant::now());
+        self.end_time = Some(compute_deadline(Utc::now(), self.remaining_seconds));
 
         // Track work session start time
         if self.mode == PomodoroMode::Work && self.work_session_start.is_none() {
@@ -184,8 +210,14 @@ impl PomodoroApp {
     }
 
     fn pause(&mut self) {
+        // Snapshot remaining time from the deadline before clearing it,
+        // so we preserve the exact seconds left at the moment of pause.
+        if let Some(end_time) = self.end_time {
+            let (remaining, _) = remaining_until(end_time, Utc::now());
+            self.remaining_seconds = remaining;
+        }
         self.state = TimerState::Paused;
-        self.last_tick = None;
+        self.end_time = None;
         self.update_menu_bar();
     }
 
@@ -193,6 +225,7 @@ impl PomodoroApp {
         let duration = match self.mode {
             PomodoroMode::Work => WORK_DURATION,
             PomodoroMode::Break => BREAK_DURATION,
+            PomodoroMode::Overflow => OVERFLOW_DURATION,
         };
         self.set_timer(duration, false);
         // Reset work session tracking (uncompleted sessions are not saved)
@@ -238,45 +271,64 @@ impl PomodoroApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
     }
 
+    /// Enter overflow ("Pocket") mode: a short configurable timer to wrap up
+    /// work before the break begins. Reached via the Pocket button or `P` key
+    /// during a break. When this timer completes, the break starts
+    /// automatically. Not counted as a completed work session.
+    fn start_overflow(&mut self, ctx: &egui::Context) {
+        self.mode = PomodoroMode::Overflow;
+        self.set_timer(OVERFLOW_DURATION, true);
+        // Pocket time is overflow from the just-completed work session — do
+        // not start a new work_session_start, so it isn't double-counted.
+        self.work_session_start = None;
+        // Exit fullscreen and resize to small window first;
+        // defer minimize so macOS can finish the fullscreen exit animation.
+        self.break_window_minimized = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(400.0, 300.0)));
+        self.minimize_after = Some(Instant::now() + Duration::from_millis(600));
+    }
+
     fn update_timer(&mut self, ctx: &egui::Context) {
         if self.state == TimerState::Running {
-            if let Some(last_tick) = self.last_tick {
-                let elapsed = last_tick.elapsed();
+            if let Some(end_time) = self.end_time {
+                let (new_remaining, completed) = remaining_until(end_time, Utc::now());
 
-                if elapsed >= Duration::from_secs(1) {
-                    let elapsed_secs = elapsed.as_secs();
-                    self.last_tick = Some(Instant::now());
-
-                    let (new_remaining, completed) =
-                        calculate_remaining_time(self.remaining_seconds, elapsed_secs);
+                // Only update display when the whole-second value changes
+                if new_remaining != self.remaining_seconds {
                     self.remaining_seconds = new_remaining;
-
-                    // Update menu bar timer display
                     self.update_menu_bar();
+                }
 
-                    // Check if timer completed
-                    if completed {
-                        match self.mode {
-                            PomodoroMode::Work => {
-                                // Save completed work session
-                                if let Some(start_time) = self.work_session_start {
-                                    let completed_at = Utc::now();
-                                    let session = WorkSession::new(start_time, completed_at);
+                if completed {
+                    self.end_time = None;
 
-                                    if let Err(e) = self.db.save_work_session(&session) {
-                                        eprintln!("Failed to save work session: {}", e);
-                                    } else {
-                                        // Increment session count on successful save
-                                        self.today_session_count += 1;
-                                    }
+                    match self.mode {
+                        PomodoroMode::Work => {
+                            // Save completed work session
+                            if let Some(start_time) = self.work_session_start {
+                                let completed_at = Utc::now();
+                                let session = WorkSession::new(start_time, completed_at);
+
+                                if let Err(e) = self.db.save_work_session(&session) {
+                                    eprintln!("Failed to save work session: {}", e);
+                                } else {
+                                    // Increment session count on successful save
+                                    self.today_session_count += 1;
                                 }
+                            }
 
-                                // Work period done, start break
-                                self.start_break(ctx);
-                            }
-                            PomodoroMode::Break => {
-                                self.finish_break(ctx);
-                            }
+                            // Work period done, start break
+                            self.start_break(ctx);
+                        }
+                        PomodoroMode::Break => {
+                            self.finish_break(ctx);
+                        }
+                        PomodoroMode::Overflow => {
+                            // Pocket time done — auto-start the break.
+                            // Not saved as a session (overflow is wrap-up
+                            // time from the just-completed work session).
+                            self.start_break(ctx);
                         }
                     }
                 }
@@ -299,9 +351,16 @@ impl PomodoroApp {
                 TimerState::Stopped => match self.mode {
                     PomodoroMode::Work => "Ready".to_string(),
                     PomodoroMode::Break => "Break Done".to_string(),
+                    PomodoroMode::Overflow => "Pocket".to_string(),
                 },
-                TimerState::Paused => format!("{} (Paused)", self.format_time()),
-                TimerState::Running => self.format_time(),
+                TimerState::Paused => match self.mode {
+                    PomodoroMode::Overflow => format!("P {} (Paused)", self.format_time()),
+                    _ => format!("{} (Paused)", self.format_time()),
+                },
+                TimerState::Running => match self.mode {
+                    PomodoroMode::Overflow => format!("P {}", self.format_time()),
+                    _ => self.format_time(),
+                },
             };
             tray.set_title(Some(&title));
         }
@@ -369,8 +428,10 @@ impl eframe::App for PomodoroApp {
             style.spacing.button_padding = egui::vec2(16.0, 8.0);
         });
 
-        if self.mode == PomodoroMode::Work {
-            // Normal window for work period
+        if self.mode != PomodoroMode::Break {
+            // Normal window for work period (and Overflow / "Pocket" mode,
+            // which reuses the same layout with a different title).
+            let is_overflow = self.mode == PomodoroMode::Overflow;
             egui::CentralPanel::default().show(ctx, |ui| {
                 // Disable default item spacing for precise control
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -424,10 +485,15 @@ impl eframe::App for PomodoroApp {
                                 ui.add_space(4.0);
                             }
 
+                            let (title_text, title_color) = if is_overflow {
+                                ("Wrapping Up", COLOR_ACCENT)
+                            } else {
+                                ("Pomodoro Timer", COLOR_BACKGROUND)
+                            };
                             ui.label(
-                                egui::RichText::new("Pomodoro Timer")
+                                egui::RichText::new(title_text)
                                     .size(24.0)
-                                    .color(COLOR_BACKGROUND)
+                                    .color(title_color)
                                     .strong(),
                             );
                             ui.add_space(8.0);
@@ -444,8 +510,10 @@ impl eframe::App for PomodoroApp {
 
                             // Control buttons (centered)
                             ui.horizontal(|ui| {
-                                let button_width = 100.0;
-                                let num_buttons = if self.state != TimerState::Stopped {
+                                let button_width = if is_overflow { 140.0 } else { 100.0 };
+                                let num_buttons = if is_overflow {
+                                    2.0
+                                } else if self.state != TimerState::Stopped {
                                     2.0
                                 } else {
                                     1.0
@@ -456,59 +524,90 @@ impl eframe::App for PomodoroApp {
                                 let available_width = ui.available_width();
                                 ui.add_space((available_width - total_width) / 2.0);
 
-                                match self.state {
-                                    TimerState::Stopped => {
-                                        if ui
-                                            .add_sized(
-                                                [button_width, 36.0],
-                                                egui::Button::new(
-                                                    egui::RichText::new("Start").size(18.0),
-                                                ),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.resume(ctx);
-                                        }
-                                    }
-                                    TimerState::Running => {
-                                        if ui
-                                            .add_sized(
-                                                [button_width, 36.0],
-                                                egui::Button::new(
-                                                    egui::RichText::new("Pause").size(18.0),
-                                                ),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.pause();
-                                        }
-                                    }
-                                    TimerState::Paused => {
-                                        if ui
-                                            .add_sized(
-                                                [button_width, 36.0],
-                                                egui::Button::new(
-                                                    egui::RichText::new("Resume").size(18.0),
-                                                ),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.resume(ctx);
-                                        }
-                                    }
-                                }
-
-                                if self.state != TimerState::Stopped
-                                    && ui
+                                if is_overflow {
+                                    // Pocket / overflow mode has exactly two
+                                    // actions: abandon the wrap-up and start a
+                                    // fresh work session, or end the wrap-up
+                                    // early and begin the break.
+                                    if ui
                                         .add_sized(
                                             [button_width, 36.0],
                                             egui::Button::new(
-                                                egui::RichText::new("Restart").size(18.0),
+                                                egui::RichText::new("Start New Session")
+                                                    .size(18.0),
                                             ),
                                         )
                                         .clicked()
-                                {
-                                    self.restart();
+                                    {
+                                        self.skip_break(ctx);
+                                    }
+                                    if ui
+                                        .add_sized(
+                                            [button_width, 36.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Start Break Early")
+                                                    .size(18.0),
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.start_break(ctx);
+                                    }
+                                } else {
+                                    match self.state {
+                                        TimerState::Stopped => {
+                                            if ui
+                                                .add_sized(
+                                                    [button_width, 36.0],
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Start").size(18.0),
+                                                    ),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.resume(ctx);
+                                            }
+                                        }
+                                        TimerState::Running => {
+                                            if ui
+                                                .add_sized(
+                                                    [button_width, 36.0],
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Pause").size(18.0),
+                                                    ),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.pause();
+                                            }
+                                        }
+                                        TimerState::Paused => {
+                                            if ui
+                                                .add_sized(
+                                                    [button_width, 36.0],
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Resume").size(18.0),
+                                                    ),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.resume(ctx);
+                                            }
+                                        }
+                                    }
+
+                                    if self.state != TimerState::Stopped
+                                        && ui
+                                            .add_sized(
+                                                [button_width, 36.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("Restart").size(18.0),
+                                                ),
+                                            )
+                                            .clicked()
+                                    {
+                                        self.restart();
+                                    }
                                 }
                             });
                         });
@@ -520,9 +619,13 @@ impl eframe::App for PomodoroApp {
             egui::CentralPanel::default().show(ctx, |ui| {
                 // Check for keyboard shortcuts during break
                 if self.remaining_seconds > 0 {
-                    // Enter key to skip break
+                    // Enter key to skip break (start a new full work timer)
                     if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                         self.skip_break(ctx);
+                    }
+                    // P key to enter Pocket (overflow) mode for short wrap-up
+                    if ctx.input(|i| i.key_pressed(egui::Key::P)) {
+                        self.start_overflow(ctx);
                     }
                     // ESC key to minimize fullscreen break window
                     if ctx.input(|i| i.key_pressed(egui::Key::Escape))
@@ -605,8 +708,12 @@ impl eframe::App for PomodoroApp {
 
                             // Break control buttons (centered)
                             ui.horizontal(|ui| {
-                                let button_width = 100.0;
-                                let num_buttons = 1.0;
+                                let button_width = 120.0;
+                                let num_buttons = if self.remaining_seconds == 0 {
+                                    1.0
+                                } else {
+                                    2.0
+                                };
                                 let spacing = ui.spacing().item_spacing.x;
                                 let total_width =
                                     button_width * num_buttons + spacing * (num_buttons - 1.0);
@@ -625,16 +732,29 @@ impl eframe::App for PomodoroApp {
                                     {
                                         self.finish_break(ctx);
                                     }
-                                } else if ui
-                                    .add_sized(
-                                        [button_width, 36.0],
-                                        egui::Button::new(
-                                            egui::RichText::new("Skip Break").size(18.0),
-                                        ),
-                                    )
-                                    .clicked()
-                                {
-                                    self.skip_break(ctx);
+                                } else {
+                                    if ui
+                                        .add_sized(
+                                            [button_width, 36.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Pocket (5 min)").size(18.0),
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.start_overflow(ctx);
+                                    }
+                                    if ui
+                                        .add_sized(
+                                            [button_width, 36.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Skip Break").size(18.0),
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.skip_break(ctx);
+                                    }
                                 }
                             });
                         });
@@ -648,54 +768,85 @@ impl eframe::App for PomodoroApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeDelta;
+
+    // ── remaining_until tests ──────────────────────────────────────────
 
     #[test]
-    fn test_calculate_remaining_time_normal_tick() {
-        // Normal case: 1 second passes
-        let (remaining, completed) = calculate_remaining_time(100, 1);
-        assert_eq!(remaining, 99);
+    fn test_remaining_until_future_deadline() {
+        let now = Utc::now();
+        let deadline = now + TimeDelta::seconds(120);
+        let (remaining, completed) = remaining_until(deadline, now);
+        assert_eq!(remaining, 120);
         assert!(!completed);
     }
 
     #[test]
-    fn test_calculate_remaining_time_multiple_seconds() {
-        // Multiple seconds pass (e.g., screen was locked)
-        let (remaining, completed) = calculate_remaining_time(100, 30);
-        assert_eq!(remaining, 70);
+    fn test_remaining_until_exact_deadline() {
+        let now = Utc::now();
+        let (remaining, completed) = remaining_until(now, now);
+        assert_eq!(remaining, 0);
+        assert!(completed);
+    }
+
+    #[test]
+    fn test_remaining_until_past_deadline_short() {
+        let now = Utc::now();
+        let deadline = now - TimeDelta::seconds(30);
+        let (remaining, completed) = remaining_until(deadline, now);
+        assert_eq!(remaining, 0);
+        assert!(completed);
+    }
+
+    #[test]
+    fn test_remaining_until_past_deadline_large_overshoot() {
+        // Computer slept for 2 hours past a 15-minute break
+        let now = Utc::now();
+        let deadline = now - TimeDelta::seconds(7200);
+        let (remaining, completed) = remaining_until(deadline, now);
+        assert_eq!(remaining, 0);
+        assert!(completed);
+    }
+
+    #[test]
+    fn test_remaining_until_sub_second_truncates() {
+        // 10.7 seconds remaining → reports 10 whole seconds
+        let now = Utc::now();
+        let deadline = now + TimeDelta::milliseconds(10_700);
+        let (remaining, completed) = remaining_until(deadline, now);
+        assert_eq!(remaining, 10);
         assert!(!completed);
     }
 
+    // ── compute_deadline tests ───────────────────────────────────────
+
     #[test]
-    fn test_calculate_remaining_time_completes_exactly() {
-        // Timer completes exactly
-        let (remaining, completed) = calculate_remaining_time(10, 10);
-        assert_eq!(remaining, 0);
-        assert!(completed);
+    fn test_compute_deadline_from_duration() {
+        let now = Utc::now();
+        let deadline = compute_deadline(now, 300);
+        // Deadline should be 300 seconds (5 min) in the future
+        let diff = (deadline - now).num_seconds();
+        assert_eq!(diff, 300);
     }
 
     #[test]
-    fn test_calculate_remaining_time_overshoots() {
-        // More time passes than remaining (user away longer than timer)
-        let (remaining, completed) = calculate_remaining_time(60, 300);
-        assert_eq!(remaining, 0);
-        assert!(completed);
+    fn test_compute_deadline_zero_duration() {
+        let now = Utc::now();
+        let deadline = compute_deadline(now, 0);
+        assert_eq!(deadline, now);
     }
 
     #[test]
-    fn test_calculate_remaining_time_already_zero() {
-        // Timer already at zero
-        let (remaining, completed) = calculate_remaining_time(0, 1);
-        assert_eq!(remaining, 0);
-        assert!(!completed); // Not a "completion" event, already was zero
+    fn test_compute_deadline_round_trips_with_remaining_until() {
+        // compute_deadline then remaining_until should return the original duration
+        let now = Utc::now();
+        let deadline = compute_deadline(now, WORK_DURATION);
+        let (remaining, completed) = remaining_until(deadline, now);
+        assert_eq!(remaining, WORK_DURATION);
+        assert!(!completed);
     }
 
-    #[test]
-    fn test_calculate_remaining_time_large_elapsed() {
-        // Very large elapsed time (computer slept for hours)
-        let (remaining, completed) = calculate_remaining_time(WORK_DURATION, 7200); // 2 hours
-        assert_eq!(remaining, 0);
-        assert!(completed);
-    }
+    // ── break mode tests ─────────────────────────────────────────────
 
     #[test]
     fn test_break_finished_state_returns_work_mode() {
@@ -707,8 +858,11 @@ mod tests {
 
     #[test]
     fn test_break_timer_completion_triggers_transition() {
-        // Given: break timer with 1 second left
-        let (remaining, completed) = calculate_remaining_time(1, 1);
+        // Given: break timer deadline reached
+        let now = Utc::now();
+        let deadline = compute_deadline(now, 1);
+        let later = now + TimeDelta::seconds(1);
+        let (remaining, completed) = remaining_until(deadline, later);
         assert_eq!(remaining, 0);
         assert!(completed);
 
@@ -723,15 +877,86 @@ mod tests {
 
     #[test]
     fn test_break_timer_not_yet_complete() {
-        let (remaining, completed) = calculate_remaining_time(BREAK_DURATION, 60);
+        let now = Utc::now();
+        let deadline = compute_deadline(now, BREAK_DURATION);
+        let later = now + TimeDelta::seconds(60);
+        let (remaining, completed) = remaining_until(deadline, later);
         assert_eq!(remaining, BREAK_DURATION - 60);
         assert!(!completed);
     }
 
     #[test]
     fn test_break_timer_completes_with_overshoot() {
-        let (remaining, completed) = calculate_remaining_time(BREAK_DURATION, BREAK_DURATION + 100);
+        let now = Utc::now();
+        let deadline = compute_deadline(now, BREAK_DURATION);
+        let later = now + TimeDelta::seconds((BREAK_DURATION + 100) as i64);
+        let (remaining, completed) = remaining_until(deadline, later);
         assert_eq!(remaining, 0);
         assert!(completed);
+    }
+
+    // ── overflow (pocket) mode tests ───────────────────────────────────
+
+    #[test]
+    fn test_overflow_duration_is_five_minutes() {
+        assert_eq!(OVERFLOW_DURATION, 5 * 60);
+    }
+
+    #[test]
+    fn test_overflow_finished_state_returns_break_mode() {
+        let (mode, remaining, state) = overflow_finished_state();
+        assert_eq!(mode, PomodoroMode::Break);
+        assert_eq!(remaining, BREAK_DURATION);
+        assert_eq!(state, TimerState::Running);
+    }
+
+    #[test]
+    fn test_overflow_timer_not_yet_complete() {
+        let now = Utc::now();
+        let deadline = compute_deadline(now, OVERFLOW_DURATION);
+        let later = now + TimeDelta::seconds(60);
+        let (remaining, completed) = remaining_until(deadline, later);
+        assert_eq!(remaining, OVERFLOW_DURATION - 60);
+        assert!(!completed);
+    }
+
+    #[test]
+    fn test_overflow_timer_completes_exactly() {
+        let now = Utc::now();
+        let deadline = compute_deadline(now, OVERFLOW_DURATION);
+        let later = now + TimeDelta::seconds(OVERFLOW_DURATION as i64);
+        let (remaining, completed) = remaining_until(deadline, later);
+        assert_eq!(remaining, 0);
+        assert!(completed);
+    }
+
+    #[test]
+    fn test_overflow_timer_completes_with_overshoot() {
+        // Long sleep / screen lock during pocket: still detects completion
+        let now = Utc::now();
+        let deadline = compute_deadline(now, OVERFLOW_DURATION);
+        let later = now + TimeDelta::seconds((OVERFLOW_DURATION as i64) + 7200);
+        let (remaining, completed) = remaining_until(deadline, later);
+        assert_eq!(remaining, 0);
+        assert!(completed);
+    }
+
+    #[test]
+    fn test_overflow_timer_completion_triggers_break_transition() {
+        // Given: overflow timer deadline reached
+        let now = Utc::now();
+        let deadline = compute_deadline(now, 1);
+        let later = now + TimeDelta::seconds(1);
+        let (remaining, completed) = remaining_until(deadline, later);
+        assert_eq!(remaining, 0);
+        assert!(completed);
+
+        // When: overflow completes, we get the finished state
+        let (mode, new_remaining, state) = overflow_finished_state();
+
+        // Then: transitions to break mode, running, full break duration
+        assert_eq!(mode, PomodoroMode::Break);
+        assert_eq!(new_remaining, BREAK_DURATION);
+        assert_eq!(state, TimerState::Running);
     }
 }
